@@ -1,0 +1,442 @@
+blueprint:
+  name: Aerotermia por demanda de TRVs v3.4
+  description: >
+    Enciende y apaga el switch de la aerotermia según la demanda de las
+    válvulas termostáticas (TRV). Un solo blueprint, sin ayudantes.
+
+    Demanda = al menos N radiadores PRIORITARIOS demandando calor (por defecto
+    1) o al menos M radiadores del RESTO demandando calor (por defecto 2).
+    Un radiador "demanda calor" cuando su atributo hvac_action es heating.
+
+    DETECCIÓN AUTOMÁTICA: todas las entidades climate cuyo id empiece por el
+    prefijo indicado (por defecto climate.trv_) se añaden solas al RESTO, salvo
+    las que ya estén en prioritarias o en excluidas. Así, una TRV nueva con
+    ese prefijo entra sin tocar el blueprint. Para desactivarlo, deja el
+    prefijo vacío y usa solo la lista manual.
+
+    Funciona por eventos: la aerotermia arranca cuando la demanda se mantiene
+    durante el retardo de encendido, y se para cuando la ausencia de demanda
+    se mantiene durante el retardo de apagado. Tras apagarse, no vuelve a
+    encenderse hasta pasado el tiempo mínimo de parada.
+
+    PROTECCIÓN HIDRÁULICA: si NINGUNA TRV demanda calor, el agua no tiene
+    adónde ir. En ese caso se apaga tras un retardo muy corto y SIN esperar el
+    tiempo mínimo en marcha. El retardo de apagado normal y el tiempo mínimo
+    en marcha solo se aplican mientras al menos un radiador sigue pidiendo
+    calor.
+
+    Al arrancar Home Assistant (o cuando el switch vuelve de no disponible)
+    reconcilia el estado: espera hasta 5 minutos a que las TRVs estén
+    disponibles y entonces decide. Si recargas las automatizaciones sin
+    reiniciar, no reconcilia hasta el siguiente cambio de demanda.
+
+    Si usabas la automatización "Demanda global calefacción" o el blueprint
+    antiguo del switch, desactívalos. El input_boolean de demanda ya no se usa.
+  domain: automation
+  source_url: https://github.com/alexgonza-rgz/ha-blueprint-aerotermia-trv/blob/main/aerotermia_demanda_trv.yaml
+
+  input:
+    heat_source_switch:
+      name: Switch de la aerotermia
+      description: Switch que se enciende y apaga según la demanda
+      selector:
+        entity:
+          filter:
+            - domain: switch
+
+    priority_trvs:
+      name: Radiadores prioritarios
+      description: >
+        Radiadores que, por sí solos, justifican arrancar la aerotermia
+        (dormitorios, cocina...). Puedes elegir varios.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: climate
+
+    min_priority:
+      name: Mínimo de prioritarios demandando calor
+      description: Cuántos de la lista anterior deben demandar calor a la vez
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 10
+          step: 1
+          mode: box
+
+    auto_prefix:
+      name: Detectar automáticamente el resto de TRVs (prefijo del id)
+      description: >
+        Todas las entidades climate cuyo id empiece por este texto y no sean
+        prioritarias ni estén excluidas se añaden solas al resto de
+        radiadores. Déjalo vacío para desactivar la detección.
+      default: "climate.trv_"
+      selector:
+        text: {}
+
+    secondary_trvs:
+      name: Resto de radiadores (añadidos a mano)
+      description: >
+        Radiadores adicionales del resto que no empiecen por el prefijo
+        anterior. Se suman a los detectados automáticamente.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: climate
+
+    excluded_trvs:
+      name: Radiadores excluidos de la detección automática
+      description: >
+        Entidades que empiezan por el prefijo pero no deben contar (una TRV
+        averiada, un radiador que no debe arrancar la aerotermia...).
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: climate
+
+    min_secondary:
+      name: Mínimo del resto demandando calor
+      description: Cuántos del resto (manuales y detectados) deben demandar calor a la vez
+      default: 2
+      selector:
+        number:
+          min: 1
+          max: 10
+          step: 1
+          mode: box
+
+    on_delay:
+      name: Retardo antes de encender
+      description: La demanda debe mantenerse este tiempo antes de arrancar
+      default:
+        hours: 0
+        minutes: 2
+        seconds: 0
+      selector:
+        duration: {}
+
+    off_delay:
+      name: Retardo antes de apagar (con algún radiador demandando)
+      description: >
+        Solo se aplica si todavía hay algún radiador pidiendo calor pero la
+        demanda ya no alcanza los mínimos. Si no queda ninguno, se usa el
+        retardo de la siguiente opción.
+      default:
+        hours: 0
+        minutes: 2
+        seconds: 0
+      selector:
+        duration: {}
+
+    no_flow_delay:
+      name: Retardo antes de apagar sin ningún radiador demandando
+      description: >
+        Con todas las TRVs sin demandar calor el agua no tiene adónde ir, así
+        que se apaga tras este breve retardo (solo para ignorar parpadeos de
+        las válvulas), sin esperar el tiempo mínimo en marcha.
+      default:
+        hours: 0
+        minutes: 0
+        seconds: 30
+      selector:
+        duration: {}
+
+    min_on_time:
+      name: Tiempo mínimo en marcha (con algún radiador demandando)
+      description: >
+        Una vez encendida, no se apaga por pérdida parcial de demanda hasta
+        pasado este tiempo. No se aplica si no queda ningún radiador
+        demandando.
+      default:
+        hours: 0
+        minutes: 5
+        seconds: 0
+      selector:
+        duration: {}
+
+    min_off_time:
+      name: Tiempo mínimo parada
+      description: Una vez apagada, no se vuelve a encender hasta pasado este tiempo
+      default:
+        hours: 0
+        minutes: 5
+        seconds: 0
+      selector:
+        duration: {}
+
+mode: restart
+
+trigger_variables:
+  priority_trvs: !input priority_trvs
+  secondary_trvs: !input secondary_trvs
+  excluded_trvs: !input excluded_trvs
+  auto_prefix: !input auto_prefix
+  min_priority: !input min_priority
+  min_secondary: !input min_secondary
+
+variables:
+  sw: !input heat_source_switch
+  priority_trvs: !input priority_trvs
+  secondary_trvs: !input secondary_trvs
+  excluded_trvs: !input excluded_trvs
+  auto_prefix: !input auto_prefix
+  min_priority: !input min_priority
+  min_secondary: !input min_secondary
+  on_cfg: !input on_delay
+  off_cfg: !input off_delay
+  no_flow_cfg: !input no_flow_delay
+  min_on_cfg: !input min_on_time
+  min_off_cfg: !input min_off_time
+  on_delay_s: "{{ (on_cfg.hours | default(0)) * 3600 + (on_cfg.minutes | default(0)) * 60 + (on_cfg.seconds | default(0)) }}"
+  off_delay_s: "{{ (off_cfg.hours | default(0)) * 3600 + (off_cfg.minutes | default(0)) * 60 + (off_cfg.seconds | default(0)) }}"
+  no_flow_s: "{{ (no_flow_cfg.hours | default(0)) * 3600 + (no_flow_cfg.minutes | default(0)) * 60 + (no_flow_cfg.seconds | default(0)) }}"
+  min_on_s: "{{ (min_on_cfg.hours | default(0)) * 3600 + (min_on_cfg.minutes | default(0)) * 60 + (min_on_cfg.seconds | default(0)) }}"
+  min_off_s: "{{ (min_off_cfg.hours | default(0)) * 3600 + (min_off_cfg.minutes | default(0)) * 60 + (min_off_cfg.seconds | default(0)) }}"
+
+triggers:
+  # La demanda se mantiene el retardo de encendido
+  - trigger: template
+    id: demand_on
+    value_template: >-
+      {% set ns = namespace(p=0, s=0, sec=[]) %}
+      {% for e in secondary_trvs %}
+        {% if e not in ns.sec and e not in priority_trvs %}{% set ns.sec = ns.sec + [e] %}{% endif %}
+      {% endfor %}
+      {% if auto_prefix | length > 0 %}
+        {% for st in states.climate %}
+          {% if st.entity_id.startswith(auto_prefix)
+             and st.entity_id not in ns.sec
+             and st.entity_id not in priority_trvs
+             and st.entity_id not in excluded_trvs %}
+            {% set ns.sec = ns.sec + [st.entity_id] %}
+          {% endif %}
+        {% endfor %}
+      {% endif %}
+      {% for e in priority_trvs %}
+        {% if is_state_attr(e, 'hvac_action', 'heating') %}{% set ns.p = ns.p + 1 %}{% endif %}
+      {% endfor %}
+      {% for e in ns.sec %}
+        {% if is_state_attr(e, 'hvac_action', 'heating') %}{% set ns.s = ns.s + 1 %}{% endif %}
+      {% endfor %}
+      {% set d = (min_priority | int(1) > 0 and ns.p >= min_priority | int(1))
+         or (min_secondary | int(2) > 0 and ns.s >= min_secondary | int(2)) %}
+      {{ d }}
+    for: !input on_delay
+
+  # La demanda deja de alcanzar los mínimos, aunque algún radiador siga abierto
+  - trigger: template
+    id: demand_off
+    value_template: >-
+      {% set ns = namespace(p=0, s=0, sec=[]) %}
+      {% for e in secondary_trvs %}
+        {% if e not in ns.sec and e not in priority_trvs %}{% set ns.sec = ns.sec + [e] %}{% endif %}
+      {% endfor %}
+      {% if auto_prefix | length > 0 %}
+        {% for st in states.climate %}
+          {% if st.entity_id.startswith(auto_prefix)
+             and st.entity_id not in ns.sec
+             and st.entity_id not in priority_trvs
+             and st.entity_id not in excluded_trvs %}
+            {% set ns.sec = ns.sec + [st.entity_id] %}
+          {% endif %}
+        {% endfor %}
+      {% endif %}
+      {% for e in priority_trvs %}
+        {% if is_state_attr(e, 'hvac_action', 'heating') %}{% set ns.p = ns.p + 1 %}{% endif %}
+      {% endfor %}
+      {% for e in ns.sec %}
+        {% if is_state_attr(e, 'hvac_action', 'heating') %}{% set ns.s = ns.s + 1 %}{% endif %}
+      {% endfor %}
+      {% set d = (min_priority | int(1) > 0 and ns.p >= min_priority | int(1))
+         or (min_secondary | int(2) > 0 and ns.s >= min_secondary | int(2)) %}
+      {{ not d }}
+    for: !input off_delay
+
+  # Ninguna TRV demanda calor: el agua no tiene adónde ir
+  - trigger: template
+    id: no_flow
+    value_template: >-
+      {% set ns = namespace(p=0, s=0, sec=[]) %}
+      {% for e in secondary_trvs %}
+        {% if e not in ns.sec and e not in priority_trvs %}{% set ns.sec = ns.sec + [e] %}{% endif %}
+      {% endfor %}
+      {% if auto_prefix | length > 0 %}
+        {% for st in states.climate %}
+          {% if st.entity_id.startswith(auto_prefix)
+             and st.entity_id not in ns.sec
+             and st.entity_id not in priority_trvs
+             and st.entity_id not in excluded_trvs %}
+            {% set ns.sec = ns.sec + [st.entity_id] %}
+          {% endif %}
+        {% endfor %}
+      {% endif %}
+      {% for e in priority_trvs %}
+        {% if is_state_attr(e, 'hvac_action', 'heating') %}{% set ns.p = ns.p + 1 %}{% endif %}
+      {% endfor %}
+      {% for e in ns.sec %}
+        {% if is_state_attr(e, 'hvac_action', 'heating') %}{% set ns.s = ns.s + 1 %}{% endif %}
+      {% endfor %}
+      {{ ns.p + ns.s == 0 }}
+    for: !input no_flow_delay
+
+  # Reconciliar al arrancar HA o cuando el switch vuelve a estar disponible
+  - trigger: homeassistant
+    event: start
+    id: reconcile
+  - trigger: state
+    entity_id: !input heat_source_switch
+    from: unavailable
+    id: reconcile
+
+actions:
+  # 0) Al reconciliar, esperar a que las TRVs estén disponibles (máx. 5 min)
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: reconcile
+        sequence:
+          - wait_template: >-
+              {% set ns = namespace(p=0, s=0, sec=[]) %}
+              {% for e in secondary_trvs %}
+                {% if e not in ns.sec and e not in priority_trvs %}{% set ns.sec = ns.sec + [e] %}{% endif %}
+              {% endfor %}
+              {% if auto_prefix | length > 0 %}
+                {% for st in states.climate %}
+                  {% if st.entity_id.startswith(auto_prefix)
+                     and st.entity_id not in ns.sec
+                     and st.entity_id not in priority_trvs
+                     and st.entity_id not in excluded_trvs %}
+                    {% set ns.sec = ns.sec + [st.entity_id] %}
+                  {% endif %}
+                {% endfor %}
+              {% endif %}
+              {% for e in priority_trvs %}
+                {% if is_state_attr(e, 'hvac_action', 'heating') %}{% set ns.p = ns.p + 1 %}{% endif %}
+              {% endfor %}
+              {% for e in ns.sec %}
+                {% if is_state_attr(e, 'hvac_action', 'heating') %}{% set ns.s = ns.s + 1 %}{% endif %}
+              {% endfor %}
+              {% set av = namespace(bad=0) %}
+              {% for e in priority_trvs + ns.sec %}
+                {% if states(e) in ['unavailable', 'unknown'] %}{% set av.bad = av.bad + 1 %}{% endif %}
+              {% endfor %}
+              {{ av.bad == 0 }}
+            timeout: "00:05:00"
+            continue_on_timeout: true
+
+  # 1) Situación actual y estado objetivo según el disparador
+  - variables:
+      counts: >-
+        {% set ns = namespace(p=0, s=0, sec=[]) %}
+        {% for e in secondary_trvs %}
+          {% if e not in ns.sec and e not in priority_trvs %}{% set ns.sec = ns.sec + [e] %}{% endif %}
+        {% endfor %}
+        {% if auto_prefix | length > 0 %}
+          {% for st in states.climate %}
+            {% if st.entity_id.startswith(auto_prefix)
+               and st.entity_id not in ns.sec
+               and st.entity_id not in priority_trvs
+               and st.entity_id not in excluded_trvs %}
+              {% set ns.sec = ns.sec + [st.entity_id] %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
+        {% for e in priority_trvs %}
+          {% if is_state_attr(e, 'hvac_action', 'heating') %}{% set ns.p = ns.p + 1 %}{% endif %}
+        {% endfor %}
+        {% for e in ns.sec %}
+          {% if is_state_attr(e, 'hvac_action', 'heating') %}{% set ns.s = ns.s + 1 %}{% endif %}
+        {% endfor %}
+        {{ {'p': ns.p, 's': ns.s, 'all': priority_trvs + ns.sec} }}
+      demand: >-
+        {{ (min_priority | int(1) > 0 and counts['p'] >= min_priority | int(1))
+           or (min_secondary | int(2) > 0 and counts['s'] >= min_secondary | int(2)) }}
+      none_heating: "{{ counts['p'] + counts['s'] == 0 }}"
+      trvs_ok: >-
+        {% set av = namespace(ok=0) %}
+        {% for e in counts['all'] %}
+          {% if states(e) not in ['unavailable', 'unknown'] %}{% set av.ok = av.ok + 1 %}{% endif %}
+        {% endfor %}
+        {{ av.ok > 0 }}
+      want_on: >-
+        {{ true if trigger.id == 'demand_on'
+           else (false if trigger.id in ['demand_off', 'no_flow'] else demand) }}
+      premise: >-
+        {{ demand if trigger.id == 'demand_on'
+           else (not demand if trigger.id == 'demand_off'
+           else (none_heating if trigger.id == 'no_flow' else true)) }}
+
+  # 2) La premisa del disparador sigue siendo cierta y el switch debe cambiar
+  #    (al reconciliar, además, debe haber al menos una TRV disponible)
+  - condition: template
+    value_template: >-
+      {{ premise
+         and (trigger.id != 'reconcile' or trvs_ok)
+         and is_state(sw, 'off' if want_on else 'on') }}
+
+  # 3) Esperar lo que falte del tiempo mínimo de parada (al encender) o de
+  #    marcha (al apagar). Sin ningún radiador demandando no hay tiempo
+  #    mínimo en marcha: se apaga ya. Al reconciliar, además, el retardo
+  #    correspondiente.
+  - variables:
+      sw_age: "{{ (now() - states[sw].last_changed).total_seconds() }}"
+      stab_s: >-
+        {{ (on_delay_s if want_on else (no_flow_s if none_heating else off_delay_s))
+           if trigger.id == 'reconcile' else 0 }}
+      min_s: >-
+        {{ (min_off_s - sw_age) if want_on
+           else (0 if none_heating else (min_on_s - sw_age)) }}
+      wait_s: "{{ [min_s, stab_s, 0] | max }}"
+  - delay:
+      seconds: "{{ wait_s | float(0) | round(0) }}"
+
+  # 4) Reevaluar tras la espera por si algo cambió
+  - variables:
+      demand_now: >-
+        {% set ns = namespace(p=0, s=0, sec=[]) %}
+        {% for e in secondary_trvs %}
+          {% if e not in ns.sec and e not in priority_trvs %}{% set ns.sec = ns.sec + [e] %}{% endif %}
+        {% endfor %}
+        {% if auto_prefix | length > 0 %}
+          {% for st in states.climate %}
+            {% if st.entity_id.startswith(auto_prefix)
+               and st.entity_id not in ns.sec
+               and st.entity_id not in priority_trvs
+               and st.entity_id not in excluded_trvs %}
+              {% set ns.sec = ns.sec + [st.entity_id] %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
+        {% for e in priority_trvs %}
+          {% if is_state_attr(e, 'hvac_action', 'heating') %}{% set ns.p = ns.p + 1 %}{% endif %}
+        {% endfor %}
+        {% for e in ns.sec %}
+          {% if is_state_attr(e, 'hvac_action', 'heating') %}{% set ns.s = ns.s + 1 %}{% endif %}
+        {% endfor %}
+        {{ (min_priority | int(1) > 0 and ns.p >= min_priority | int(1))
+           or (min_secondary | int(2) > 0 and ns.s >= min_secondary | int(2)) }}
+  - condition: template
+    value_template: >-
+      {{ demand_now == want_on
+         and is_state(sw, 'off' if want_on else 'on') }}
+
+  # 5) Actuar
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ want_on }}"
+        sequence:
+          - action: switch.turn_on
+            target:
+              entity_id: !input heat_source_switch
+    default:
+      - action: switch.turn_off
+        target:
+          entity_id: !input heat_source_switch
